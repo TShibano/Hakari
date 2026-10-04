@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hakari</title>
+<style>
+  :root { --fg: #1d1d1f; --bg: #fafafa; --muted: #6e6e73; --line: #d2d2d7; --accent: #0a66d8; --bar: #e8eef8; --err: #c62828; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg: #f2f2f7; --bg: #1c1c1e; --muted: #98989d; --line: #3a3a3c; --accent: #5ea2ff; --bar: #2a3442; --err: #ff6b6b; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Hiragino Sans", sans-serif; }
+  main { max-width: 680px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 20px; }
+  label { display: block; font-weight: 600; margin: 16px 0 6px; }
+  label small { font-weight: 400; color: var(--muted); }
+  input, textarea { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: inherit; font: inherit; }
+  textarea { min-height: 120px; resize: vertical; }
+  .choice { display: grid; grid-template-columns: 1.5em 1fr 2fr 2em; gap: 6px; align-items: center; margin-bottom: 6px; }
+  .code { color: var(--muted); font-family: ui-monospace, monospace; }
+  button { font: inherit; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: inherit; padding: 6px 12px; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; padding: 10px 20px; margin-top: 20px; }
+  button:disabled { opacity: .5; cursor: wait; }
+  #result { margin-top: 28px; }
+  .answer { font-size: 20px; font-weight: 700; }
+  .row { display: grid; grid-template-columns: 8em 1fr 4.5em; gap: 8px; align-items: center; margin: 6px 0; }
+  .row .bar { background: var(--bar); border-radius: 4px; height: 14px; overflow: hidden; }
+  .row .fill { background: var(--accent); height: 100%; }
+  .row .pct { text-align: right; font-variant-numeric: tabular-nums; }
+  .row .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .error { color: var(--err); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Hakari</h1>
+  <form id="form">
+    <label for="context">文脈 <small>判定対象の文章</small></label>
+    <textarea id="context" required></textarea>
+
+    <label for="field">項目名</label>
+    <input id="field" required placeholder="例: sentiment">
+
+    <label for="meaning">項目の意味 <small>任意</small></label>
+    <input id="meaning" placeholder="例: レビュー全体の感情">
+
+    <label>選択肢 <small>ラベル（必須）と説明（任意）</small></label>
+    <div id="choices"></div>
+    <button type="button" id="add">選択肢を追加</button>
+
+    <div><button type="submit" class="primary" id="submit">判定する</button></div>
+  </form>
+  <section id="result" aria-live="polite"></section>
+</main>
+<script>
+const MAX = 26;
+const choicesEl = document.getElementById("choices");
+const resultEl = document.getElementById("result");
+
+function renumber() {
+  [...choicesEl.children].forEach((row, i) => {
+    row.querySelector(".code").textContent = String.fromCharCode(65 + i);
+  });
+  document.getElementById("add").disabled = choicesEl.children.length >= MAX;
+}
+
+function addChoice(label = "", description = "") {
+  const row = document.createElement("div");
+  row.className = "choice";
+  row.innerHTML = '<span class="code"></span><input class="label" required placeholder="ラベル">' +
+    '<input class="desc" placeholder="説明"><button type="button" aria-label="削除">×</button>';
+  row.querySelector(".label").value = label;
+  row.querySelector(".desc").value = description;
+  row.querySelector("button").onclick = () => {
+    if (choicesEl.children.length > 2) { row.remove(); renumber(); }
+  };
+  choicesEl.appendChild(row);
+  renumber();
+}
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function showResult(data) {
+  resultEl.replaceChildren();
+  resultEl.append(el("div", null, "回答"), el("div", "answer", data.answer));
+  for (const p of data.probabilities) {
+    const row = el("div", "row");
+    const bar = el("div", "bar");
+    const fill = el("div", "fill");
+    fill.style.width = (p.probability * 100).toFixed(1) + "%";
+    bar.append(fill);
+    row.append(el("span", "name", `${p.code}: ${p.label}`), bar, el("span", "pct", (p.probability * 100).toFixed(1) + "%"));
+    resultEl.append(row);
+  }
+}
+
+function showError(msg) {
+  resultEl.replaceChildren(el("p", "error", msg));
+}
+
+document.getElementById("add").onclick = () => addChoice();
+
+document.getElementById("form").onsubmit = async (ev) => {
+  ev.preventDefault();
+  const submit = document.getElementById("submit");
+  const body = {
+    context: document.getElementById("context").value,
+    field: document.getElementById("field").value,
+    meaning: document.getElementById("meaning").value,
+    choices: [...choicesEl.children].map((row) => ({
+      label: row.querySelector(".label").value,
+      description: row.querySelector(".desc").value,
+    })),
+  };
+  submit.disabled = true;
+  resultEl.replaceChildren(el("p", null, "判定中…"));
+  try {
+    const res = await fetch("/api/decide", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      showError(typeof data.detail === "string" ? data.detail : "入力内容を確認してください");
+    } else {
+      showResult(data);
+    }
+  } catch (e) {
+    showError("サーバーに接続できない: " + e.message);
+  } finally {
+    submit.disabled = false;
+  }
+};
+
+addChoice();
+addChoice();
+</script>
+</body>
+</html>
