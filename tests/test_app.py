@@ -93,3 +93,9 @@ def test_decide_returns_502_when_model_fails(fake, client):
     res = client.post("/api/decide", json=BODY)
     assert res.status_code == 502
     assert res.json() == {"detail": "Ollama への問い合わせに失敗した"}
+
+
+def test_stylesheet_is_served(client):
+    res = client.get("/static/style.css")
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("text/css")
