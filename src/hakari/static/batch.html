@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hakari 一括タグ付け</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<main>
+  <h1>Hakari</h1>
+  <nav><a href="/">1件ずつ判定</a><a href="/batch" aria-current="page">CSV で一括タグ付け</a></nav>
+
+  <form id="form">
+    <label for="file">CSV ファイル <small>UTF-8 または Shift_JIS，1行目は見出し</small></label>
+    <input id="file" type="file" accept=".csv,text/csv" required>
+    <p id="fileinfo" class="muted"></p>
+
+    <label for="column">自由記述の列</label>
+    <select id="column" required disabled></select>
+
+    <label>タグ <small>タグ名（必須）と意味（任意，何を含むかを具体的に）</small></label>
+    <div id="tags"></div>
+    <button type="button" id="add">タグを追加</button>
+
+    <p id="estimate" class="muted"></p>
+    <div><button type="submit" class="primary" id="submit">タグ付けを開始</button></div>
+  </form>
+
+  <section id="job" aria-live="polite" hidden>
+    <p id="status"></p>
+    <div class="row"><span class="name">進捗</span><div class="bar"><div class="fill" id="progress" style="width:0"></div></div><span class="pct" id="pct"></span></div>
+    <div id="summary"></div>
+    <div class="actions">
+      <button type="button" id="cancel">中断</button>
+      <a class="button" id="download" hidden>結果 CSV をダウンロード</a>
+    </div>
+  </section>
+</main>
+<script>
+// 1回の問い合わせの目安（実測で約0.4秒）
+const SEC_PER_CALL = 0.4;
+const STORAGE_KEY = "hakari.tags";
+const tagsEl = document.getElementById("tags");
+const columnEl = document.getElementById("column");
+let rowCount = 0;
+let pollTimer = null;
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function formatDuration(sec) {
+  if (sec < 60) return `${Math.ceil(sec)}秒`;
+  if (sec < 3600) return `${Math.ceil(sec / 60)}分`;
+  return `${Math.floor(sec / 3600)}時間${Math.ceil((sec % 3600) / 60)}分`;
+}
+
+function currentTags() {
+  return [...tagsEl.children].map((row) => ({
+    name: row.querySelector(".name").value.trim(),
+    meaning: row.querySelector(".meaning").value.trim(),
+  }));
+}
+
+// タグの組は繰り返し使うことが多いので，この端末に覚えておく．
+function saveTags() {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(currentTags())); } catch (e) {}
+}
+
+function loadTags() {
+  try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; } catch (e) { return []; }
+}
+
+function updateEstimate() {
+  const n = currentTags().filter((t) => t.name).length;
+  document.getElementById("estimate").textContent =
+    rowCount && n ? `問い合わせ ${rowCount * n} 回，所要時間の目安 ${formatDuration(rowCount * n * SEC_PER_CALL)}（空欄の回答があればその分少なくなる）` : "";
+}
+
+function addTag(name = "", meaning = "") {
+  const row = el("div", "tag");
+  row.innerHTML = '<input class="name" required placeholder="タグ名（例: 価格）">' +
+    '<input class="meaning" placeholder="意味（例: 価格・料金・コストへの言及）"><button type="button" aria-label="削除">×</button>';
+  row.querySelector(".name").value = name;
+  row.querySelector(".meaning").value = meaning;
+  row.querySelector("button").onclick = () => {
+    if (tagsEl.children.length > 1) { row.remove(); saveTags(); updateEstimate(); }
+  };
+  row.oninput = () => { saveTags(); updateEstimate(); };
+  tagsEl.appendChild(row);
+}
+
+async function errorDetail(res) {
+  try {
+    const data = await res.json();
+    return typeof data.detail === "string" ? data.detail : "入力内容を確認してください";
+  } catch (e) {
+    return `エラー（${res.status}）`;
+  }
+}
+
+document.getElementById("file").onchange = async (ev) => {
+  const info = document.getElementById("fileinfo");
+  columnEl.replaceChildren();
+  columnEl.disabled = true;
+  rowCount = 0;
+  updateEstimate();
+  const file = ev.target.files[0];
+  if (!file) return;
+  const fd = new FormData();
+  fd.append("file", file);
+  const res = await fetch("/api/csv/columns", { method: "POST", body: fd });
+  if (!res.ok) {
+    info.className = "error";
+    info.textContent = await errorDetail(res);
+    return;
+  }
+  const data = await res.json();
+  info.className = "muted";
+  info.textContent = `${data.rows} 件`;
+  rowCount = data.rows;
+  for (const h of data.headers) columnEl.append(new Option(h, h));
+  columnEl.disabled = false;
+  updateEstimate();
+};
+
+document.getElementById("add").onclick = () => addTag();
+
+function showJob(job) {
+  const finished = ["done", "failed", "cancelled"].includes(job.status);
+  const labels = { pending: "開始待ち", running: "処理中", done: "完了", failed: "失敗", cancelled: "中断" };
+  const status = document.getElementById("status");
+  status.className = job.status === "failed" ? "error" : "";
+  let text = `${labels[job.status]}: ${job.done} / ${job.total} 件`;
+  if (job.error) text += `（${job.error}）`;
+  if (job.status === "failed" || job.status === "cancelled") text += "．判定済みの行だけをダウンロードできる．";
+  status.textContent = text;
+
+  const ratio = job.total ? job.done / job.total : 1;
+  document.getElementById("progress").style.width = (ratio * 100).toFixed(1) + "%";
+  document.getElementById("pct").textContent = (ratio * 100).toFixed(0) + "%";
+
+  const summary = document.getElementById("summary");
+  summary.replaceChildren(el("p", "muted", "タグごとの該当件数（判定済みの行のうち）"));
+  for (const [name, count] of Object.entries(job.summary)) {
+    const row = el("div", "row");
+    const bar = el("div", "bar");
+    const fill = el("div", "fill");
+    fill.style.width = (job.done ? (count / job.done) * 100 : 0).toFixed(1) + "%";
+    bar.append(fill);
+    row.append(el("span", "name", name), bar, el("span", "pct", `${count} 件`));
+    summary.append(row);
+  }
+
+  document.getElementById("cancel").hidden = finished;
+  const dl = document.getElementById("download");
+  dl.hidden = !finished || job.done === 0;
+  dl.href = `/api/batch/${job.id}/result.csv`;
+  document.getElementById("submit").disabled = !finished;
+  return finished;
+}
+
+async function poll(id) {
+  const res = await fetch(`/api/batch/${id}`);
+  if (!res.ok) {
+    document.getElementById("status").textContent = await errorDetail(res);
+    document.getElementById("submit").disabled = false;
+    return;
+  }
+  if (!showJob(await res.json())) pollTimer = setTimeout(() => poll(id), 1000);
+}
+
+document.getElementById("form").onsubmit = async (ev) => {
+  ev.preventDefault();
+  clearTimeout(pollTimer);
+  const fd = new FormData();
+  fd.append("file", document.getElementById("file").files[0]);
+  fd.append("column", columnEl.value);
+  fd.append("tags", JSON.stringify(currentTags()));
+  const submit = document.getElementById("submit");
+  submit.disabled = true;
+  const section = document.getElementById("job");
+  section.hidden = false;
+  const res = await fetch("/api/batch", { method: "POST", body: fd });
+  if (!res.ok) {
+    const status = document.getElementById("status");
+    status.className = "error";
+    status.textContent = await errorDetail(res);
+    document.getElementById("summary").replaceChildren();
+    submit.disabled = false;
+    return;
+  }
+  const job = await res.json();
+  document.getElementById("cancel").onclick = () => fetch(`/api/batch/${job.id}/cancel`, { method: "POST" });
+  showJob(job);
+  poll(job.id);
+};
+
+const saved = loadTags();
+if (saved.length) saved.forEach((t) => addTag(t.name, t.meaning));
+else addTag();
+</script>
+</body>
+</html>
